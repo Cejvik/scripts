@@ -13,6 +13,12 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+$currentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$currentPrincipal = [Security.Principal.WindowsPrincipal]::new($currentIdentity)
+if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    throw 'Tento skript musí být spuštěn jako správce, protože čtení USN Journalu vyžaduje zvýšená oprávnění.'
+}
+
 function Add-UsnReaderType {
     if ('UsnReader' -as [type]) { return }
 
@@ -68,7 +74,7 @@ public static class UsnReader {
     static extern uint GetFinalPathNameByHandle(IntPtr handle, StringBuilder path, uint length, uint flags);
 
     static IntPtr OpenVolume(string drive) {
-        return CreateFile("\\\\.\\" + drive.TrimEnd('\\'), GENERIC_READ | GENERIC_WRITE,
+        return CreateFile("\\\\.\\" + drive.TrimEnd('\\'), GENERIC_READ,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
     }
     public static JournalData GetJournal(string drive) {
@@ -130,13 +136,17 @@ function Get-TrackedDirectories([string[]] $RootPaths, [int] $MaxDepth) {
         $resolved = (Resolve-Path -LiteralPath $root).Path
         if ($resolved.Length -gt 3) { $resolved = $resolved.TrimEnd('\') }
         $result.Add($resolved)
-        if ($MaxDepth -lt 0) {
-            Get-ChildItem -LiteralPath $resolved -Directory -Force -Recurse -ErrorAction SilentlyContinue |
-                ForEach-Object { $result.Add($_.FullName.TrimEnd('\')) }
-        } elseif ($MaxDepth -gt 0) {
-            Get-ChildItem -LiteralPath $resolved -Directory -Force -Recurse -ErrorAction SilentlyContinue |
-                Where-Object { (($_.FullName.Substring($resolved.Length).Trim('\') -split '\\').Count) -le $MaxDepth } |
-                ForEach-Object { $result.Add($_.FullName.TrimEnd('\')) }
+        try {
+            if ($MaxDepth -lt 0) {
+                Get-ChildItem -LiteralPath $resolved -Directory -Force -Recurse -ErrorAction SilentlyContinue |
+                    ForEach-Object { $result.Add($_.FullName.TrimEnd('\')) }
+            } elseif ($MaxDepth -gt 0) {
+                Get-ChildItem -LiteralPath $resolved -Directory -Force -Recurse -ErrorAction SilentlyContinue |
+                    Where-Object { (($_.FullName.Substring($resolved.Length).Trim('\') -split '\\').Count) -le $MaxDepth } |
+                    ForEach-Object { $result.Add($_.FullName.TrimEnd('\')) }
+            }
+        } catch {
+            Write-Warning "Adresáře pod '$resolved' nelze celé projít a budou částečně přeskočeny: $($_.Exception.Message)"
         }
     }
     return $result | Sort-Object -Unique
@@ -144,8 +154,12 @@ function Get-TrackedDirectories([string[]] $RootPaths, [int] $MaxDepth) {
 
 function Get-DirectoryBytes([string] $Path) {
     $sum = [int64]0
-    Get-ChildItem -LiteralPath $Path -File -Force -Recurse -ErrorAction SilentlyContinue |
-        ForEach-Object { $sum += $_.Length }
+    try {
+        Get-ChildItem -LiteralPath $Path -File -Force -Recurse -ErrorAction SilentlyContinue |
+            ForEach-Object { $sum += $_.Length }
+    } catch {
+        Write-Warning "Adresář '$Path' nelze celý přečíst; nedostupné položky budou vynechány: $($_.Exception.Message)"
+    }
     return $sum
 }
 
